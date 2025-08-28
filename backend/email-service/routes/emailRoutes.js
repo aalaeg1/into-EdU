@@ -1,32 +1,38 @@
 const express = require("express");
 const router = express.Router();
 const transporter = require("../utils/transporter");
-
-
 const axios = require("axios");
 
-router.post("/forgot-password", async (req, res) => {
-    const { email } = req.body;
+const TEACHER_SERVICE = "http://localhost:5002";
 
+/**
+ * POST /api/email/forgot-password
+ * Verifies the teacher exists and sends a reset guidance email (no stored password).
+ */
+router.post("/forgot-password", async (req, res) => {
+    const { email } = req.body || {};
     if (!email) {
         return res.status(400).json({ success: false, message: "Email requis." });
     }
 
     try {
-        // Appel au teacher-service pour récupérer tous les enseignants
-        const response = await axios.get("http://localhost:5002/api/teachers");
-        const teachers = response.data;
+        // Ensure teacher exists (teacher-service does not expose password)
+        await axios.get(
+            `${TEACHER_SERVICE}/api/teachers/${encodeURIComponent(email)}`
+        );
 
-        const teacher = teachers.find(t => t.email === email);
+        const resetUrl = `http://localhost:3000/reset-password?email=${encodeURIComponent(
+            email
+        )}`;
 
-        if (!teacher) {
-            return res.status(404).json({ success: false, message: "Cet email n'existe pas." });
-        }
+        const text = `Bonjour,
 
-        const message = `
-Bonjour ${teacher.prenom} ${teacher.nom},
+Vous avez demandé à réinitialiser votre mot de passe.
 
-Voici votre mot de passe : ${teacher.password}
+Pour définir un nouveau mot de passe, veuillez suivre ce lien :
+${resetUrl}
+
+Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet email.
 
 Cordialement,
 L'équipe pédagogique`;
@@ -34,32 +40,41 @@ L'équipe pédagogique`;
         await transporter.sendMail({
             from: process.env.EMAIL_USER,
             to: email,
-            subject: "Récupération de mot de passe",
-            text: message,
+            subject: "Réinitialisation du mot de passe",
+            text,
         });
 
-        console.log(`📧 Email de récupération envoyé à ${email}`);
-        res.json({ success: true });
-
-    } catch (error) {
-        console.error("❌ Erreur lors du forgot-password:", error.message);
-        res.status(500).json({ success: false, message: "Erreur serveur" });
+        console.log(`📧 Email de reset envoyé à ${email}`);
+        return res.json({ success: true });
+    } catch (err) {
+        if (err?.response?.status === 404) {
+            return res
+                .status(404)
+                .json({ success: false, message: "Cet email n'existe pas." });
+        }
+        console.error("❌ Erreur forgot-password:", err?.message || err);
+        return res
+            .status(500)
+            .json({ success: false, message: "Erreur serveur" });
     }
 });
 
-
+/**
+ * POST /api/email/send
+ * Sends the invitation email using YOUR original message.
+ * Required fields: nom, prenom, email, password
+ */
 router.post("/send", async (req, res) => {
-    const { nom, prenom, email, password } = req.body;
+    const { nom, prenom, email, password } = req.body || {};
 
     if (!nom || !prenom || !email || !password) {
         return res.status(400).json({
             success: false,
-            message: "Tous les champs sont requis (nom, prenom, email, password)."
+            message: "Tous les champs sont requis (nom, prenom, email, password).",
         });
     }
 
-    const message = `
-Bonjour ${prenom} ${nom},
+    const message = `Bonjour ${prenom} ${nom},
 
 Voici vos informations de connexion à la plateforme :
 Email : ${email}
@@ -69,20 +84,20 @@ Cordialement,
 L'équipe pédagogique
 `;
 
-    const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: "Vos accès à la plateforme",
-        text: message,
-    };
-
     try {
-        await transporter.sendMail(mailOptions);
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: "Vos accès à la plateforme",
+            text: message,
+        });
         console.log(`📧 Email envoyé à ${email}`);
-        res.json({ success: true });
+        return res.json({ success: true });
     } catch (error) {
         console.error("❌ Erreur lors de l'envoi de l'email :", error);
-        res.status(500).json({ success: false, message: "Erreur lors de l'envoi de l'email." });
+        return res
+            .status(500)
+            .json({ success: false, message: "Erreur lors de l'envoi de l'email." });
     }
 });
 

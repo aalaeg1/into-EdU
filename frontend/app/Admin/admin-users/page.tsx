@@ -1,226 +1,292 @@
 "use client";
-import { useRouter, useParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Download, FileUp, Play, X } from "lucide-react";
 
-type PDFFile = { originalName: string; filename: string; };
-type H5PFile = { originalName: string; filename: string; };
-type Folder = {
-    _id: string;
-    name: string;
-    pdfs: PDFFile[];
-    h5ps: H5PFile[];
+import { useEffect, useMemo, useState } from "react";
+
+type Teacher = {
+    _id?: string;
+    nom?: string;
+    prenom?: string;
+    email: string;
+    password?: string;
+    blocked?: boolean;
 };
 
-export default function FolderView() {
-    const paramsRaw = useParams();
-    // Assure que params n'est jamais null (Next.js retourne toujours un objet ou undefined, jamais null)
-    const params = paramsRaw ?? {};
+const TEACHERS_API = "http://localhost:5002/api/teachers";
+const EMAIL_API = "http://localhost:5003/api/email/send";
 
-    // Sécurise l'accès à folderName
-    let folderName: string | undefined;
-    if (typeof params === "object" && params !== null && "folderName" in params) {
-        const value = (params as Record<string, string | string[]>).folderName;
-        folderName = Array.isArray(value) ? value[0] : value;
+const STORAGE_KEY = "sentEmails";
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+    const res = await fetch(url, init);
+    if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${txt}`);
     }
+    return res.json() as Promise<T>;
+}
 
-    const router = useRouter();
-    const fileRef = useRef<HTMLInputElement>(null);
-    const h5pRef = useRef<HTMLInputElement>(null);
-    const [folder, setFolder] = useState<Folder | null>(null);
-    const [currentH5P, setCurrentH5P] = useState<string | null>(null);
-    const [iframeSrc, setIframeSrc] = useState<string>("");
+export default function AdminUsersPage() {
+    const [teachers, setTeachers] = useState<Teacher[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
 
-    const [email, setEmail] = useState<string | null>(null);
+    const [sending, setSending] = useState<string | null>(null);
+    const [working, setWorking] = useState<string | null>(null);
+    const [sentEmails, setSentEmails] = useState<string[]>([]);
+    const [query, setQuery] = useState("");
+
     useEffect(() => {
-        if (typeof window !== "undefined") {
-            setEmail(localStorage.getItem("email"));
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (raw) setSentEmails(JSON.parse(raw));
+        } catch {}
+    }, []);
+    useEffect(() => {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(sentEmails));
+        } catch {}
+    }, [sentEmails]);
+
+    const load = async () => {
+        setLoading(true);
+        setLoadError(null);
+        try {
+            const list = await fetchJson<Teacher[]>(TEACHERS_API, { cache: "no-store" });
+            const seen = new Set<string>();
+            const dedup = list.filter((t) => {
+                const e = (t.email || "").toLowerCase().trim();
+                if (!e || seen.has(e)) return false;
+                seen.add(e);
+                return true;
+            });
+            setTeachers(dedup);
+        } catch (err: any) {
+            setLoadError(err?.message || "Failed to load teachers");
+            setTeachers([]);
+        } finally {
+            setLoading(false);
         }
+    };
+    useEffect(() => {
+        void load();
     }, []);
 
-    // Cleanup blob URLs on unmount
-    useEffect(() => {
-        return () => {
-            if (iframeSrc) URL.revokeObjectURL(iframeSrc);
-        };
-    }, [iframeSrc]);
+    const filtered = useMemo(() => {
+        const q = query.trim().toLowerCase();
+        if (!q) return teachers;
+        return teachers.filter((t) => {
+            const full = `${t.prenom ?? ""} ${t.nom ?? ""}`.toLowerCase();
+            return (
+                full.includes(q) ||
+                (t.email || "").toLowerCase().includes(q) ||
+                (t.nom ?? "").toLowerCase().includes(q) ||
+                (t.prenom ?? "").toLowerCase().includes(q)
+            );
+        });
+    }, [teachers, query]);
 
-    useEffect(() => {
-        if (!email || !folderName) return;
-        fetch(`http://localhost:5002/api/folders/${email}`)
-            .then(res => res.json())
-            .then((folders: Folder[]) => {
-                const match = folders.find((f) => f.name === folderName) ?? null;
-                setFolder(match);
-            });
-    }, [folderName, email]);
-
-    const handlePDFUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file || !folder?._id) return;
-
-        const formData = new FormData();
-        formData.append("pdf", file);
-
-        await fetch(
-            `http://localhost:5002/api/folders/${folder._id}/upload-pdf`,
-            {
-                method: "POST",
-                body: formData,
-            }
-        );
-
-        location.reload();
-    };
-
-    const handleH5PUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file || !folder?._id) return;
-
-        const formData = new FormData();
-        formData.append("h5p", file);
-
-        await fetch(
-            `http://localhost:5002/api/folders/${folder._id}/upload-h5p`,
-            {
-                method: "POST",
-                body: formData,
-            }
-        );
-
-        location.reload();
-    };
-
-    const playH5P = async (h5pFile: H5PFile) => {
+    // Invite -> teacher-service generates temp password; email-service sends it
+    const handleSendEmail = async (t: Teacher) => {
+        setSending(t.email);
         try {
-            // Fetch the H5P file from the server
-            const response = await fetch(`http://localhost:5002/uploads/${h5pFile.filename}`);
-            const blob = await response.blob();
+            const r = await fetch(
+                `${TEACHERS_API}/${encodeURIComponent(t.email)}/invite`,
+                { method: "POST", headers: { "Content-Type": "application/json" } }
+            );
+            if (!r.ok) throw new Error(await r.text());
+            const invited = (await r.json()) as {
+                email: string;
+                nom?: string;
+                prenom?: string;
+                password: string;
+            };
 
-            // Create a blob URL for the H5P content
-            const url = URL.createObjectURL(blob);
-            setIframeSrc(url);
-            setCurrentH5P(h5pFile.originalName);
-        } catch (error) {
-            console.error("Error loading H5P content:", error);
-            alert("Erreur lors du chargement du contenu H5P");
+            const mail = await fetch(EMAIL_API, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    nom: invited.nom ?? t.nom ?? "",
+                    prenom: invited.prenom ?? t.prenom ?? "",
+                    email: invited.email,
+                    password: invited.password, // original wording in the email-service
+                }),
+            });
+
+            let ok = mail.ok;
+            let body: any = null;
+            try {
+                body = await mail.json();
+            } catch {}
+            if (body && typeof body.success === "boolean") ok = ok && body.success;
+            if (!ok) {
+                const msg = (body && (body.message || body.error)) || `HTTP ${mail.status}`;
+                throw new Error(msg);
+            }
+
+            setSentEmails((prev) => (prev.includes(t.email) ? prev : [...prev, t.email]));
+            alert(`Invitation envoyée à ${t.email}`);
+        } catch (err: any) {
+            alert(`Erreur lors de l'envoi: ${err?.message || String(err)}`);
+        } finally {
+            setSending(null);
         }
     };
 
-    const closeH5P = () => {
-        if (iframeSrc) {
-            URL.revokeObjectURL(iframeSrc);
-            setIframeSrc("");
+    const handleToggleBlock = async (t: Teacher) => {
+        setWorking(t.email);
+        try {
+            const res = await fetch(
+                `${TEACHERS_API}/${encodeURIComponent(t.email)}/state`,
+                {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ blocked: !t.blocked }),
+                }
+            );
+            if (!res.ok) throw new Error(await res.text());
+            const updated = (await res.json()) as Teacher;
+            setTeachers((prev) =>
+                prev.map((x) => (x.email === t.email ? { ...x, blocked: updated.blocked } : x))
+            );
+        } catch (e: any) {
+            alert(`Impossible de mettre à jour l'état: ${e?.message || e}`);
+        } finally {
+            setWorking(null);
         }
-        setCurrentH5P(null);
+    };
+
+    const handleDelete = async (t: Teacher) => {
+        if (!confirm(`Supprimer l'enseignant ${t.email} ? Cette action est irréversible.`))
+            return;
+        setWorking(t.email);
+        try {
+            const res = await fetch(
+                `${TEACHERS_API}/${encodeURIComponent(t.email)}`,
+                { method: "DELETE" }
+            );
+            if (!res.ok) throw new Error(await res.text());
+            setTeachers((prev) => prev.filter((x) => x.email !== t.email));
+        } catch (e: any) {
+            alert(`Suppression impossible: ${e?.message || e}`);
+        } finally {
+            setWorking(null);
+        }
     };
 
     return (
-        <div className="p-10 space-y-6">
-            <button
-                onClick={() => router.push("/Teacher/Create")}
-                className="text-blue-600 hover:underline flex items-center gap-1"
-            >
-                <ArrowLeft className="w-4 h-4" /> Retour
-            </button>
+        <div className="px-8 py-10">
+            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-6">
+                <div>
+                    <h3 className="text-2xl font-bold text-gray-800">Liste des enseignants</h3>
+                    <p className="text-gray-500 text-sm">Invitez, bloquez ou supprimez des comptes.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                    <input
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        className="border rounded px-3 py-2 w-64"
+                        placeholder="Rechercher par nom ou email…"
+                    />
+                    <button onClick={load} className="px-3 py-2 border rounded bg-white hover:bg-gray-50">
+                        Refresh
+                    </button>
+                </div>
+            </div>
 
-            <h2 className="text-2xl font-bold">
-                Dossier&nbsp;: {folderName}
-            </h2>
-
-            {/* H5P Player Area */}
-            {currentH5P && (
-                <div className="border rounded-lg overflow-hidden bg-white shadow-lg">
-                    <div className="bg-purple-600 text-white p-3 flex justify-between items-center">
-                        <h3 className="font-semibold">🎓 {currentH5P}</h3>
-                        <button
-                            onClick={closeH5P}
-                            className="text-white hover:text-gray-200"
-                        >
-                            <X className="w-5 h-5" />
-                        </button>
-                    </div>
-                    <div className="h-[600px]">
-                        <iframe
-                            src={iframeSrc}
-                            className="w-full h-full border-0"
-                            title="H5P Content"
-                            allow="fullscreen"
-                        />
-                    </div>
+            {loading && <p className="text-center text-gray-600">Chargement…</p>}
+            {loadError && (
+                <div className="bg-red-50 text-red-700 border border-red-200 rounded p-3 mb-4">
+                    {loadError}
                 </div>
             )}
 
-            <div className="space-y-4">
-                <div>
-                    <button
-                        className="bg-green-600 text-white px-4 py-2 rounded"
-                        onClick={() => fileRef.current?.click()}
-                    >
-                        <FileUp className="w-4 h-4 inline-block mr-2" /> Uploader PDF
-                    </button>
-                    <input
-                        ref={fileRef}
-                        type="file"
-                        accept="application/pdf"
-                        onChange={handlePDFUpload}
-                        hidden
-                    />
-                    <ul className="mt-3">
-                        {folder?.pdfs.map((pdf, i) => (
-                            <li key={i} className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded">
-                                📄 {pdf.originalName}
-                                <a
-                                    href={`http://localhost:5002/uploads/${pdf.filename}`}
-                                    className="text-blue-500 underline"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                >
-                                    <Download className="w-4 h-4 inline" />
-                                </a>
-                            </li>
-                        ))}
-                    </ul>
-                </div>
+            {!loading && !loadError && (
+                <div className="overflow-x-auto bg-white border rounded shadow">
+                    <table className="min-w-full">
+                        <thead>
+                        <tr className="bg-gray-50">
+                            <th className="py-2 px-4 border-b text-left">Nom</th>
+                            <th className="py-2 px-4 border-b text-left">Prénom</th>
+                            <th className="py-2 px-4 border-b text-left">Email</th>
+                            <th className="py-2 px-4 border-b text-left">Statut</th>
+                            <th className="py-2 px-4 border-b text-center w-72">Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {filtered.length === 0 && (
+                            <tr>
+                                <td colSpan={5} className="py-6 text-center text-gray-500">
+                                    Aucun enseignant trouvé.
+                                </td>
+                            </tr>
+                        )}
 
-                <div>
-                    <button
-                        className="bg-purple-600 text-white px-4 py-2 rounded"
-                        onClick={() => h5pRef.current?.click()}
-                    >
-                        <FileUp className="w-4 h-4 inline-block mr-2" /> Uploader H5P
-                    </button>
-                    <input
-                        ref={h5pRef}
-                        type="file"
-                        accept=".h5p,.zip"
-                        onChange={handleH5PUpload}
-                        hidden
-                    />
-                    <ul className="mt-3">
-                        {folder?.h5ps.map((h5p, i) => (
-                            <li key={i} className="flex items-center gap-2 p-2 hover:bg-gray-50 rounded">
-                                🎓 {h5p.originalName}
-                                <button
-                                    onClick={() => playH5P(h5p)}
-                                    className="text-green-600 hover:text-green-800"
-                                    title="Jouer le contenu H5P"
-                                >
-                                    <Play className="w-4 h-4" />
-                                </button>
-                                <a
-                                    href={`http://localhost:5002/uploads/${h5p.filename}`}
-                                    className="text-blue-500 underline"
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                >
-                                    <Download className="w-4 h-4 inline" />
-                                </a>
-                            </li>
-                        ))}
-                    </ul>
+                        {filtered.map((t, idx) => {
+                            const isSent = sentEmails.includes(t.email);
+                            const rowKey = t._id ?? t.email ?? `row-${idx}`;
+                            const busy = working === t.email;
+
+                            return (
+                                <tr key={rowKey} className="hover:bg-gray-50">
+                                    <td className="py-2 px-4 border-b">{t.nom || "—"}</td>
+                                    <td className="py-2 px-4 border-b">{t.prenom || "—"}</td>
+                                    <td className="py-2 px-4 border-b">{t.email}</td>
+                                    <td className="py-2 px-4 border-b">
+                                        {t.blocked ? (
+                                            <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-red-100 text-red-700">
+                          Blocked
+                        </span>
+                                        ) : (
+                                            <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs bg-emerald-100 text-emerald-700">
+                          Active
+                        </span>
+                                        )}
+                                    </td>
+                                    <td className="py-2 px-4 border-b text-center">
+                                        <div className="flex items-center gap-2 justify-center">
+                                            <button
+                                                onClick={() => handleSendEmail(t)}
+                                                className={`px-3 py-1 rounded text-white text-sm ${
+                                                    isSent
+                                                        ? "bg-emerald-600 hover:bg-emerald-700"
+                                                        : "bg-blue-600 hover:bg-blue-700"
+                                                } disabled:opacity-60`}
+                                                disabled={busy || sending === t.email}
+                                                title={isSent ? "Renvoyer l'invitation" : "Envoyer l'invitation"}
+                                            >
+                                                {sending === t.email ? "Envoi…" : isSent ? "Renvoyer" : "Inviter"}
+                                            </button>
+
+                                            <button
+                                                onClick={() => handleToggleBlock(t)}
+                                                className={`px-3 py-1 rounded text-white text-sm ${
+                                                    t.blocked
+                                                        ? "bg-yellow-600 hover:bg-yellow-700"
+                                                        : "bg-gray-700 hover:bg-gray-800"
+                                                } disabled:opacity-60`}
+                                                disabled={busy}
+                                                title={t.blocked ? "Débloquer" : "Bloquer"}
+                                            >
+                                                {t.blocked ? "Unblock" : "Block"}
+                                            </button>
+
+                                            <button
+                                                onClick={() => handleDelete(t)}
+                                                className="px-3 py-1 rounded text-white text-sm bg-red-600 hover:bg-red-700 disabled:opacity-60"
+                                                disabled={busy}
+                                                title="Supprimer"
+                                            >
+                                                Delete
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                        </tbody>
+                    </table>
                 </div>
-            </div>
+            )}
         </div>
     );
 }

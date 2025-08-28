@@ -31,6 +31,7 @@ const folderRoutes  = require("./routes/folders");
 app.use("/api/teachers", teacherRoutes);
 app.use("/api/folders",  folderRoutes);
 
+
 const UPLOAD_DIR = path.resolve(process.cwd(), "uploads");
 app.use("/uploads", express.static(UPLOAD_DIR));
 

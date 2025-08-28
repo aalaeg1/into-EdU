@@ -256,6 +256,12 @@ router.delete("/:folderId/pdf/:filename", async (req, res) => {
     await removeFileSafe(path.join(UPLOAD_DIR, path.basename(filename)));
     res.sendStatus(204);
 });
+// GET /api/folders/admin  -> all folders (admin only)
+router.get("/admin", async (req, res) => {
+    // TODO: add real auth/role check
+    const all = await Folder.find().lean();
+    res.json(all);
+});
 
 router.delete("/:folderId/h5p/:filename", async (req, res) => {
     const me = meFromHeader(req, res);
