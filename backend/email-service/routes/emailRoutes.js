@@ -79,7 +79,7 @@ router.post("/send", async (req, res) => {
 Voici vos informations de connexion à la plateforme :
 Email : ${email}
 Mot de passe : ${password}
-
+le clé API pour AI Course Planner : 586b6920ea0da175dd669058374e7377f516150ec939f092bdc1bc295da6ac7f
 Cordialement,
 L'équipe pédagogique
 `;

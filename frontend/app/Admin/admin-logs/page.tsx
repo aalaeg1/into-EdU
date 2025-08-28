@@ -25,9 +25,6 @@ type LogItem = {
     meta?: Record<string, unknown>;
 };
 
-const LOCAL_LOGS_KEY = "adminLogs_v1";
-
-/** real data fetch utils */
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, init);
     if (!res.ok) {
@@ -39,6 +36,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export default function AdminLogsPage() {
     const [logs, setLogs] = useState<LogItem[]>([]);
+    const [lastSignin, setLastSignin] = useState<{ email: string; when: string }[]>([]);
     const [err, setErr] = useState<string | null>(null);
     const [q, setQ] = useState("");
     const [loading, setLoading] = useState(true);
@@ -48,15 +46,17 @@ export default function AdminLogsPage() {
             setLoading(true);
             setErr(null);
             try {
-                // load local admin actions (invite/block/delete) recorded by UI
-                let local: LogItem[] = [];
-                try {
-                    const raw = localStorage.getItem(LOCAL_LOGS_KEY);
-                    if (raw) local = JSON.parse(raw);
-                } catch {}
+                // Teachers (to get lastSignInAt)
+                const teachers: { email: string; lastSignInAt?: string }[] = await fetchJson(TEACHER_API, {
+                    cache: "no-store",
+                });
+                const last = (teachers || [])
+                    .filter((t) => !!t.lastSignInAt)
+                    .map((t) => ({ email: t.email, when: t.lastSignInAt as string }))
+                    .sort((a, b) => +new Date(b.when) - +new Date(a.when));
+                setLastSignin(last);
 
-                // infer upload logs from folders API
-                const teachers: { email: string }[] = await fetchJson(TEACHER_API, { cache: "no-store" });
+                // Folders for inferred upload logs
                 let folders: Folder[] | null = null;
                 try {
                     folders = await fetchJson<Folder[]>(FOLDERS_ADMIN_API, { cache: "no-store" });
@@ -76,11 +76,11 @@ export default function AdminLogsPage() {
                     folders = merged;
                 }
 
-                const derived: LogItem[] = [];
+                const contentDerived: LogItem[] = [];
                 for (const f of folders || []) {
                     for (const p of f.pdfs || []) {
                         if (!p.uploadedAt) continue;
-                        derived.push({
+                        contentDerived.push({
                             id: `pdf:${f._id}:${p.filename}`,
                             when: p.uploadedAt,
                             actor: f.teacherEmail,
@@ -90,7 +90,7 @@ export default function AdminLogsPage() {
                     }
                     for (const h of f.h5ps || []) {
                         if (!h.uploadedAt) continue;
-                        derived.push({
+                        contentDerived.push({
                             id: `h5p:${f._id}:${h.filename}`,
                             when: h.uploadedAt,
                             actor: f.teacherEmail,
@@ -100,13 +100,13 @@ export default function AdminLogsPage() {
                     }
                 }
 
-                const all = [...local, ...derived].sort(
-                    (a, b) => +new Date(b.when) - +new Date(a.when)
-                );
+                const all = contentDerived.sort((a, b) => +new Date(b.when) - +new Date(a.when));
                 setLogs(all);
-            } catch (e: any) {
-                setErr(e?.message || "Failed to load logs");
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                setErr(msg || "Failed to load logs");
                 setLogs([]);
+                setLastSignin([]);
             } finally {
                 setLoading(false);
             }
@@ -130,7 +130,7 @@ export default function AdminLogsPage() {
                 <div>
                     <h3 className="text-2xl font-bold text-gray-800">System Logs</h3>
                     <p className="text-gray-500 text-sm">
-                        Shows local admin actions and inferred content uploads from your folders service.
+                        Shows last sign-ins (from the backend) and inferred content uploads.
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -143,8 +143,40 @@ export default function AdminLogsPage() {
                 </div>
             </div>
 
-            {err && <div className="rounded border border-red-200 bg-red-50 text-red-700 px-4 py-3">{err}</div>}
+            {/* Last sign-in table */}
+            <div className="bg-white border rounded shadow overflow-x-auto">
+                <div className="px-4 py-3 border-b bg-gray-50 text-sm font-semibold text-gray-700">
+                    Last sign-in (per teacher)
+                </div>
+                <table className="min-w-full">
+                    <thead className="bg-gray-50">
+                    <tr>
+                        <th className="px-4 py-2 text-left">Teacher</th>
+                        <th className="px-4 py-2 text-left">Last sign-in</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {lastSignin.length === 0 ? (
+                        <tr>
+                            <td colSpan={2} className="px-4 py-6 text-center text-gray-500">
+                                No sign-ins recorded yet.
+                            </td>
+                        </tr>
+                    ) : (
+                        lastSignin.map((r) => (
+                            <tr key={r.email} className="hover:bg-gray-50">
+                                <td className="px-4 py-2 border-b">{r.email}</td>
+                                <td className="px-4 py-2 border-b">
+                                    {new Date(r.when).toLocaleString()}
+                                </td>
+                            </tr>
+                        ))
+                    )}
+                    </tbody>
+                </table>
+            </div>
 
+            {/* Content/Upload logs */}
             <div className="bg-white border rounded shadow overflow-x-auto">
                 <table className="min-w-full">
                     <thead className="bg-gray-50">
@@ -175,6 +207,12 @@ export default function AdminLogsPage() {
                     </tbody>
                 </table>
             </div>
+
+            {err && (
+                <div className="rounded border border-red-200 bg-red-50 text-red-700 px-4 py-3">
+                    {err}
+                </div>
+            )}
         </div>
     );
 }

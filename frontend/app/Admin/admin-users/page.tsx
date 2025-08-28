@@ -7,22 +7,28 @@ type Teacher = {
     nom?: string;
     prenom?: string;
     email: string;
-    password?: string;
     blocked?: boolean;
+    invitedAt?: string;     // comes from backend
+    inviteCount?: number;   // optional, for display if you add it later
+};
+
+type EmailServiceResponse = {
+    success?: boolean;
+    message?: string;
+    error?: string;
 };
 
 const TEACHERS_API = "http://localhost:5002/api/teachers";
 const EMAIL_API = "http://localhost:5003/api/email/send";
 
-const STORAGE_KEY = "sentEmails";
-
+/** small fetch helper with types */
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, init);
     if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status} ${txt}`);
     }
-    return res.json() as Promise<T>;
+    return (await res.json()) as T;
 }
 
 export default function AdminUsersPage() {
@@ -32,26 +38,16 @@ export default function AdminUsersPage() {
 
     const [sending, setSending] = useState<string | null>(null);
     const [working, setWorking] = useState<string | null>(null);
-    const [sentEmails, setSentEmails] = useState<string[]>([]);
     const [query, setQuery] = useState("");
 
-    useEffect(() => {
-        try {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (raw) setSentEmails(JSON.parse(raw));
-        } catch {}
-    }, []);
-    useEffect(() => {
-        try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(sentEmails));
-        } catch {}
-    }, [sentEmails]);
-
+    /** Load list from backend (keeps invitedAt so the button shows "Renvoyer") */
     const load = async () => {
         setLoading(true);
         setLoadError(null);
         try {
             const list = await fetchJson<Teacher[]>(TEACHERS_API, { cache: "no-store" });
+
+            // De-duplicate by email but keep fields (including invitedAt)
             const seen = new Set<string>();
             const dedup = list.filter((t) => {
                 const e = (t.email || "").toLowerCase().trim();
@@ -59,14 +55,17 @@ export default function AdminUsersPage() {
                 seen.add(e);
                 return true;
             });
+
             setTeachers(dedup);
-        } catch (err: any) {
-            setLoadError(err?.message || "Failed to load teachers");
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setLoadError(msg || "Failed to load teachers");
             setTeachers([]);
         } finally {
             setLoading(false);
         }
     };
+
     useEffect(() => {
         void load();
     }, []);
@@ -85,48 +84,64 @@ export default function AdminUsersPage() {
         });
     }, [teachers, query]);
 
-    // Invite -> teacher-service generates temp password; email-service sends it
+    /** Invite (or re-invite) a teacher: backend stamps invitedAt and returns it */
     const handleSendEmail = async (t: Teacher) => {
         setSending(t.email);
         try {
-            const r = await fetch(
-                `${TEACHERS_API}/${encodeURIComponent(t.email)}/invite`,
-                { method: "POST", headers: { "Content-Type": "application/json" } }
-            );
+            // 1) Ask teacher-service to (re)generate temp password + persist invitedAt
+            const r = await fetch(`${TEACHERS_API}/${encodeURIComponent(t.email)}/invite`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+            });
             if (!r.ok) throw new Error(await r.text());
             const invited = (await r.json()) as {
                 email: string;
                 nom?: string;
                 prenom?: string;
                 password: string;
+                invitedAt?: string;
+                inviteCount?: number;
             };
 
-            const mail = await fetch(EMAIL_API, {
+            // 2) Send the actual email
+            const mailRes = await fetch(EMAIL_API, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     nom: invited.nom ?? t.nom ?? "",
                     prenom: invited.prenom ?? t.prenom ?? "",
                     email: invited.email,
-                    password: invited.password, // original wording in the email-service
+                    password: invited.password,
                 }),
             });
 
-            let ok = mail.ok;
-            let body: any = null;
+            let ok = mailRes.ok;
+            let body: EmailServiceResponse | null = null;
             try {
-                body = await mail.json();
-            } catch {}
+                body = (await mailRes.json()) as EmailServiceResponse;
+            } catch {
+                // email service might not return JSON; rely on status
+            }
             if (body && typeof body.success === "boolean") ok = ok && body.success;
             if (!ok) {
-                const msg = (body && (body.message || body.error)) || `HTTP ${mail.status}`;
+                const msg = (body && (body.message || body.error)) || `HTTP ${mailRes.status}`;
                 throw new Error(msg);
             }
 
-            setSentEmails((prev) => (prev.includes(t.email) ? prev : [...prev, t.email]));
+            // 3) Reflect invited state locally so the button switches to "Renvoyer"
+            const stamped = invited.invitedAt || new Date().toISOString();
+            setTeachers((prev) =>
+                prev.map((x) =>
+                    x.email === t.email
+                        ? { ...x, invitedAt: stamped, inviteCount: invited.inviteCount ?? x.inviteCount }
+                        : x
+                )
+            );
+
             alert(`Invitation envoyée à ${t.email}`);
-        } catch (err: any) {
-            alert(`Erreur lors de l'envoi: ${err?.message || String(err)}`);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            alert(`Erreur lors de l'envoi: ${msg}`);
         } finally {
             setSending(null);
         }
@@ -135,39 +150,36 @@ export default function AdminUsersPage() {
     const handleToggleBlock = async (t: Teacher) => {
         setWorking(t.email);
         try {
-            const res = await fetch(
-                `${TEACHERS_API}/${encodeURIComponent(t.email)}/state`,
-                {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ blocked: !t.blocked }),
-                }
-            );
+            const res = await fetch(`${TEACHERS_API}/${encodeURIComponent(t.email)}/state`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ blocked: !t.blocked }),
+            });
             if (!res.ok) throw new Error(await res.text());
             const updated = (await res.json()) as Teacher;
             setTeachers((prev) =>
                 prev.map((x) => (x.email === t.email ? { ...x, blocked: updated.blocked } : x))
             );
-        } catch (e: any) {
-            alert(`Impossible de mettre à jour l'état: ${e?.message || e}`);
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            alert(`Impossible de mettre à jour l'état: ${msg}`);
         } finally {
             setWorking(null);
         }
     };
 
     const handleDelete = async (t: Teacher) => {
-        if (!confirm(`Supprimer l'enseignant ${t.email} ? Cette action est irréversible.`))
-            return;
+        if (!confirm(`Supprimer l'enseignant ${t.email} ? Cette action est irréversible.`)) return;
         setWorking(t.email);
         try {
-            const res = await fetch(
-                `${TEACHERS_API}/${encodeURIComponent(t.email)}`,
-                { method: "DELETE" }
-            );
+            const res = await fetch(`${TEACHERS_API}/${encodeURIComponent(t.email)}`, {
+                method: "DELETE",
+            });
             if (!res.ok) throw new Error(await res.text());
             setTeachers((prev) => prev.filter((x) => x.email !== t.email));
-        } catch (e: any) {
-            alert(`Suppression impossible: ${e?.message || e}`);
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            alert(`Suppression impossible: ${msg}`);
         } finally {
             setWorking(null);
         }
@@ -209,22 +221,24 @@ export default function AdminUsersPage() {
                             <th className="py-2 px-4 border-b text-left">Prénom</th>
                             <th className="py-2 px-4 border-b text-left">Email</th>
                             <th className="py-2 px-4 border-b text-left">Statut</th>
-                            <th className="py-2 px-4 border-b text-center w-72">Actions</th>
+                            <th className="py-2 px-4 border-b text-left">Invité le</th>
+                            <th className="py-2 px-4 border-b text-center w-80">Actions</th>
                         </tr>
                         </thead>
                         <tbody>
                         {filtered.length === 0 && (
                             <tr>
-                                <td colSpan={5} className="py-6 text-center text-gray-500">
+                                <td colSpan={6} className="py-6 text-center text-gray-500">
                                     Aucun enseignant trouvé.
                                 </td>
                             </tr>
                         )}
 
                         {filtered.map((t, idx) => {
-                            const isSent = sentEmails.includes(t.email);
                             const rowKey = t._id ?? t.email ?? `row-${idx}`;
                             const busy = working === t.email;
+                            const invitedLabel = t.invitedAt ? new Date(t.invitedAt).toLocaleString() : "—";
+                            const inviteBtnText = t.invitedAt ? "Renvoyer" : "Inviter";
 
                             return (
                                 <tr key={rowKey} className="hover:bg-gray-50">
@@ -242,27 +256,24 @@ export default function AdminUsersPage() {
                         </span>
                                         )}
                                     </td>
+                                    <td className="py-2 px-4 border-b">{invitedLabel}</td>
                                     <td className="py-2 px-4 border-b text-center">
                                         <div className="flex items-center gap-2 justify-center">
                                             <button
                                                 onClick={() => handleSendEmail(t)}
                                                 className={`px-3 py-1 rounded text-white text-sm ${
-                                                    isSent
-                                                        ? "bg-emerald-600 hover:bg-emerald-700"
-                                                        : "bg-blue-600 hover:bg-blue-700"
+                                                    t.invitedAt ? "bg-emerald-600 hover:bg-emerald-700" : "bg-blue-600 hover:bg-blue-700"
                                                 } disabled:opacity-60`}
                                                 disabled={busy || sending === t.email}
-                                                title={isSent ? "Renvoyer l'invitation" : "Envoyer l'invitation"}
+                                                title={t.invitedAt ? "Renvoyer l'invitation" : "Envoyer l'invitation"}
                                             >
-                                                {sending === t.email ? "Envoi…" : isSent ? "Renvoyer" : "Inviter"}
+                                                {sending === t.email ? "Envoi…" : inviteBtnText}
                                             </button>
 
                                             <button
                                                 onClick={() => handleToggleBlock(t)}
                                                 className={`px-3 py-1 rounded text-white text-sm ${
-                                                    t.blocked
-                                                        ? "bg-yellow-600 hover:bg-yellow-700"
-                                                        : "bg-gray-700 hover:bg-gray-800"
+                                                    t.blocked ? "bg-yellow-600 hover:bg-yellow-700" : "bg-gray-700 hover:bg-gray-800"
                                                 } disabled:opacity-60`}
                                                 disabled={busy}
                                                 title={t.blocked ? "Débloquer" : "Bloquer"}

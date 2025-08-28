@@ -9,8 +9,7 @@ const FOLDERS_BY_TEACHER_API = "http://localhost:5002/api/folders";
 
 /** shared local keys */
 const TYPES_KEY = "activityTypesState_v1";
-const INVITES_KEY = "sentEmails"; // from admin-users page
-const LOCAL_LOGS_KEY = "adminLogs_v1";
+const INVITES_KEY = "sentEmails"; // legacy local list from admin-users page
 
 type Share = { email: string; role: "view" | "edit" };
 type FileMeta = { originalName: string; filename: string; uploadedAt?: string };
@@ -23,6 +22,11 @@ type Folder = {
     h5ps: FileMeta[];
 };
 
+type TeacherLite = {
+    email: string;
+    invitedAt?: string | null;   // <-- use this from backend
+};
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, init);
     if (!res.ok) {
@@ -33,21 +37,24 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export default function AdminReportsPage() {
-    const [teachers, setTeachers] = useState<{ email: string }[]>([]);
+    const [teachers, setTeachers] = useState<TeacherLite[]>([]);
     const [folders, setFolders] = useState<Folder[]>([]);
     const [typesState, setTypesState] = useState<Record<string, boolean>>({});
-    const [invited, setInvited] = useState<string[]>([]);
+    const [legacyInvited, setLegacyInvited] = useState<string[]>([]);
     const [err, setErr] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
 
+    // Load teachers + folders from backend
     useEffect(() => {
         (async () => {
             setLoading(true);
             setErr(null);
             try {
-                const tchs = await fetchJson<{ email: string }[]>(TEACHER_API, { cache: "no-store" });
+                // Teachers come with invitedAt (if present in your schema)
+                const tchs = await fetchJson<TeacherLite[]>(TEACHER_API, { cache: "no-store" });
                 setTeachers(tchs || []);
 
+                // Folders (admin endpoint or per-teacher fallback)
                 let all: Folder[] | null = null;
                 try {
                     all = await fetchJson<Folder[]>(FOLDERS_ADMIN_API, { cache: "no-store" });
@@ -67,8 +74,9 @@ export default function AdminReportsPage() {
                     all = merged;
                 }
                 setFolders(all || []);
-            } catch (e: any) {
-                setErr(e?.message || "Failed to load data");
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                setErr(msg || "Failed to load data");
                 setTeachers([]);
                 setFolders([]);
             } finally {
@@ -77,19 +85,19 @@ export default function AdminReportsPage() {
         })();
     }, []);
 
-    // local states
+    // Load local (client) states
     useEffect(() => {
         try {
             const rawT = localStorage.getItem(TYPES_KEY);
-            if (rawT) setTypesState(JSON.parse(rawT));
+            if (rawT) setTypesState(JSON.parse(rawT) as Record<string, boolean>);
         } catch {}
         try {
             const rawI = localStorage.getItem(INVITES_KEY);
-            if (rawI) setInvited(JSON.parse(rawI));
+            if (rawI) setLegacyInvited(JSON.parse(rawI) as string[]);
         } catch {}
     }, []);
 
-    // computed
+    // Derived content counts
     const pdfCount = useMemo(
         () => folders.reduce((s, f) => s + (f.pdfs?.length || 0), 0),
         [folders]
@@ -99,12 +107,26 @@ export default function AdminReportsPage() {
         [folders]
     );
 
+    // Compute invited teachers from backend + local storage (unique emails)
+    const invitedTeachersCount = useMemo(() => {
+        const fromDB = new Set(
+            (teachers || [])
+                .filter((t) => !!t.invitedAt)
+                .map((t) => t.email.trim().toLowerCase())
+        );
+        for (const e of legacyInvited) {
+            const k = (e || "").trim().toLowerCase();
+            if (k) fromDB.add(k);
+        }
+        return fromDB.size;
+    }, [teachers, legacyInvited]);
+
+    // Other totals
     const totals = useMemo(() => {
         const total = pdfCount + h5pCount;
         const activeTypes = Object.values(typesState).filter(Boolean).length;
         const disabledTypes = Object.values(typesState).filter((v) => !v).length;
 
-        // per-teacher content
         const perTeacher: Record<string, number> = {};
         for (const f of folders) {
             const n = (f.pdfs?.length || 0) + (f.h5ps?.length || 0);
@@ -114,6 +136,7 @@ export default function AdminReportsPage() {
         return { total, activeTypes, disabledTypes, perTeacher };
     }, [pdfCount, h5pCount, typesState, folders]);
 
+    // CSV exports
     const exportSummaryCSV = () => {
         const lines = [
             "Metric,Value",
@@ -123,7 +146,7 @@ export default function AdminReportsPage() {
             `H5P/ZIP Count,${h5pCount}`,
             `Active Types,${totals.activeTypes}`,
             `Disabled Types,${totals.disabledTypes}`,
-            `Invited Teachers,${invited.length}`,
+            `Invited Teachers,${invitedTeachersCount}`,
         ];
         const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
         const url = URL.createObjectURL(blob);
@@ -173,7 +196,7 @@ export default function AdminReportsPage() {
                     { label: "H5P/ZIP", value: h5pCount },
                     { label: "Active Types", value: totals.activeTypes },
                     { label: "Disabled Types", value: totals.disabledTypes },
-                    { label: "Invited Teachers", value: invited.length },
+                    { label: "Invited Teachers", value: invitedTeachersCount },
                 ].map((c, i) => (
                     <div key={`${c.label}-${i}`} className="bg-white rounded-xl shadow-md px-6 py-4">
                         <div className="text-xs font-semibold text-gray-700 mb-1">{c.label}</div>

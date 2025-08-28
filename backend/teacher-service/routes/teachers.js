@@ -54,7 +54,6 @@ router.post("/verify", async (req, res) => {
         if (!match && t.password && typeof t.password === "string") {
             match = t.password === password;
         }
-
         if (!match) return res.status(401).json({ ok: false, message: "bad credentials" });
 
         return res.json({
@@ -73,9 +72,7 @@ router.post("/verify", async (req, res) => {
 });
 
 /* ---------------------------------- READ ---------------------------------- */
-/**
- * IMPORTANT: Place /search BEFORE /:email to avoid being matched by the param route.
- */
+// IMPORTANT: keep /search before /:email
 router.get("/search", async (req, res) => {
     try {
         const q = (req.query.q || "").toString().trim();
@@ -96,6 +93,7 @@ router.get("/search", async (req, res) => {
 
 router.get("/", async (_req, res) => {
     try {
+        // includes invitedAt, inviteCount, lastSignInAt automatically
         const teachers = await Teacher.find().select("-__v -password");
         res.json(teachers);
     } catch {
@@ -114,14 +112,8 @@ router.get("/:email", async (req, res) => {
 });
 
 /* --------------------------------- CREATE --------------------------------- */
-/**
- * If password is omitted, a secure temp password is generated and returned as `tempPassword`
- * (so the admin UI can email it). Remove the two lines marked "RETURN temp" if you don't
- * want to ever reveal it.
- */
 router.post("/", upload.single("photo"), async (req, res) => {
     try {
-        // sanitize body: ignore _id if provided
         const {
             _id: _ignoreId,
             email,
@@ -139,9 +131,10 @@ router.post("/", upload.single("photo"), async (req, res) => {
         if (exists) return res.status(409).json({ error: "Email already exists" });
 
         // generate temp password if missing
-        const temp = password && String(password).length > 0
-            ? String(password)
-            : crypto.randomBytes(9).toString("base64url"); // ~12 chars, URL-safe
+        const temp =
+            password && String(password).length > 0
+                ? String(password)
+                : crypto.randomBytes(9).toString("base64url"); // ~12 chars
 
         const hash = await bcrypt.hash(temp, 10);
 
@@ -158,8 +151,8 @@ router.post("/", upload.single("photo"), async (req, res) => {
         });
 
         const { password: _pw, __v, ...safe } = doc.toObject();
-        // RETURN temp → expose once so UI can email it
-        return res.status(201).json({ ...safe, tempPassword: temp }); // RETURN temp
+        // expose temp once for email service
+        return res.status(201).json({ ...safe, tempPassword: temp });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: "Erreur serveur" });
@@ -169,7 +162,6 @@ router.post("/", upload.single("photo"), async (req, res) => {
 /* ------------------------------ UPDATE PROFILE ---------------------------- */
 router.patch("/:email", upload.single("photo"), async (req, res) => {
     try {
-        // ignore _id in patch
         const { _id: _ignoreId, prenom, nom, phone, classes, subjects } = req.body;
         const update = { prenom, nom, phone, classes, subjects };
         if (req.file) update.photoUrl = `/uploads/${req.file.filename}`;
@@ -207,10 +199,6 @@ router.post("/change-password", async (req, res) => {
 });
 
 /* --------------------------- BLOCK / UNBLOCK STATE ------------------------ */
-/**
- * PATCH /api/teachers/:email/state
- * Body: { blocked: boolean }
- */
 router.patch("/:email/state", async (req, res) => {
     try {
         const { blocked } = req.body || {};
@@ -237,6 +225,73 @@ router.delete("/:email", async (req, res) => {
         if (!doc) return res.status(404).json({ error: "Not found" });
         res.json({ ok: true });
     } catch {
+        res.status(500).json({ error: "Erreur serveur" });
+    }
+});
+
+/* ------------------------------ INVITE (ONLY ONE) ------------------------- */
+/**
+ * POST /api/teachers/:email/invite
+ * - (Re)generates a temp password, saves hash
+ * - Stamps invitedAt and increments inviteCount
+ * - Returns details for the email-service
+ */
+router.post("/:email/invite", async (req, res) => {
+    try {
+        const email = (req.params.email || "").toLowerCase().trim();
+        if (!email) return res.status(400).json({ error: "email required" });
+
+        const t = await Teacher.findOne({ email });
+        if (!t) return res.status(404).json({ error: "Not found" });
+        if (t.blocked) return res.status(403).json({ error: "blocked" });
+
+        const tempPassword = crypto.randomBytes(9).toString("base64url");
+        t.password = await bcrypt.hash(tempPassword, 10);
+
+        // persist invite metadata
+        t.invitedAt = new Date();
+        t.inviteCount = (t.inviteCount || 0) + 1;
+
+        await t.save();
+
+        res.json({
+            email: t.email,
+            nom: t.nom || "",
+            prenom: t.prenom || "",
+            password: tempPassword,
+            invitedAt: t.invitedAt.toISOString(),
+            inviteCount: t.inviteCount,
+        });
+    } catch (err) {
+        console.error("invite error:", err);
+        res.status(500).json({ error: "Erreur serveur" });
+    }
+});
+
+/* ----------------------------- LAST SIGN-IN ------------------------------- */
+/**
+ * POST /api/teachers/:email/last-signin
+ * Body (optional): { when: ISOString }
+ */
+router.post("/:email/last-signin", async (req, res) => {
+    try {
+        const email = (req.params.email || "").toLowerCase().trim();
+        if (!email) return res.status(400).json({ error: "email required" });
+
+        const whenIso = req.body?.when;
+        const when =
+            whenIso && !Number.isNaN(Date.parse(whenIso)) ? new Date(whenIso) : new Date();
+
+        const doc = await Teacher.findOneAndUpdate(
+            { email },
+            { lastSignInAt: when },
+            { new: true }
+        ).select("email lastSignInAt -_id");
+
+        if (!doc) return res.status(404).json({ error: "Not found" });
+        res.json(doc);
+    } catch (e) {
+        console.error("last-signin error:", e);
         res.status(500).json({ error: "Erreur serveur" });
     }
 });

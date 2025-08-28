@@ -2,7 +2,10 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import "./LoginForm.css";
-import { signIn } from "next-auth/react";
+import { signIn, signOut } from "next-auth/react";
+
+const AUTH_API = "http://localhost:5001/api/login";
+const TEACHER_SERVICE = "http://localhost:5002";
 
 export default function LoginForm() {
     const [email, setEmail] = useState("");
@@ -23,17 +26,31 @@ export default function LoginForm() {
 
         setBusy(true);
         try {
-            const res = await fetch("http://localhost:5001/api/login", {
+            const res = await fetch(AUTH_API, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ email, password }),
             });
-
             const result = await res.json();
 
             if (res.ok && result.success) {
-                localStorage.setItem("role", result.role);
-                localStorage.setItem("email", email);
+                // store role + email locally
+                try {
+                    localStorage.setItem("role", result.role);
+                    localStorage.setItem("email", email);
+                } catch {}
+
+                // best-effort: record last sign-in (also done by auth-service)
+                fetch(
+                    `${TEACHER_SERVICE}/api/teachers/${encodeURIComponent(
+                        email
+                    )}/last-signin`,
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ when: new Date().toISOString() }),
+                    }
+                ).catch(() => {});
 
                 if (result.role === "admin") router.push("/Admin/admin-dashboard");
                 else if (result.role === "teacher") router.push("/Teacher/Dashboard");
@@ -53,9 +70,12 @@ export default function LoginForm() {
         setError("");
         setGBusy(true);
         try {
+            // Clear sticky Google session so the account chooser always appears
+            await signOut({ redirect: false });
+
             await signIn("google", {
-                callbackUrl: "/auth/google-after", // ✅ page route
-                prompt: "select_account",          // force chooser every time
+                callbackUrl: "/auth/google-after", // <- our page that stores email+role and redirects
+                prompt: "select_account",           // force chooser
             });
         } catch (err) {
             console.error("Google sign-in error:", err);
@@ -79,7 +99,9 @@ export default function LoginForm() {
             <div className="right-panel">
                 <form className="login-form" onSubmit={handleLogin}>
                     <h2>Sign In</h2>
-                    {error && <div style={{ color: "red", marginBottom: 10 }}>{error}</div>}
+                    {error && (
+                        <div style={{ color: "red", marginBottom: 10 }}>{error}</div>
+                    )}
 
                     <h3>Email Address</h3>
                     <input
@@ -124,8 +146,22 @@ export default function LoginForm() {
 
                     <p className="disclaimer">
                         Protected by reCAPTCHA and subject to the Google{" "}
-                        <a href="https://policies.google.com/privacy" target="_blank">Privacy Policy</a> and{" "}
-                        <a href="https://policies.google.com/terms" target="_blank">Terms of Service</a>.
+                        <a
+                            href="https://policies.google.com/privacy"
+                            target="_blank"
+                            rel="noreferrer"
+                        >
+                            Privacy Policy
+                        </a>{" "}
+                        and{" "}
+                        <a
+                            href="https://policies.google.com/terms"
+                            target="_blank"
+                            rel="noreferrer"
+                        >
+                            Terms of Service
+                        </a>
+                        .
                     </p>
                 </form>
             </div>

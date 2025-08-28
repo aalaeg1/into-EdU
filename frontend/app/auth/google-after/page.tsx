@@ -4,8 +4,10 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { SessionProvider, useSession } from "next-auth/react";
 
+const TEACHER_SERVICE = "http://localhost:5002";
+
 export default function GoogleAfter() {
-    // Wrap this page with SessionProvider so useSession works
+    // Wrap with SessionProvider so useSession works on this standalone page
     return (
         <SessionProvider>
             <GoogleAfterInner />
@@ -26,10 +28,21 @@ function GoogleAfterInner() {
             return;
         }
 
+        // Persist sign-in and role locally (like your password flow)
         try {
             localStorage.setItem("email", email);
             localStorage.setItem("role", "teacher");
         } catch {}
+
+        // NEW: tell the backend about this sign-in time
+        fetch(
+            `${TEACHER_SERVICE}/api/teachers/${encodeURIComponent(email)}/last-signin`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ when: new Date().toISOString() }),
+            }
+        ).catch(() => {});
 
         router.replace("/Teacher/Dashboard");
     }, [status, session, router]);

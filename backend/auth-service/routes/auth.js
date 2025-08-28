@@ -9,12 +9,28 @@ const ADMIN_EMAIL = "mern_team@ma-hb.com";
 const ADMIN_PASSWORD = "admin123";
 
 const TEACHER_SERVICE = "http://localhost:5002";
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID; // same as NEXT_PUBLIC_GOOGLE_CLIENT_ID
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
+// helper: record last sign-in in teacher-service (best-effort)
+async function recordLastSignin(email) {
+    try {
+        await fetch(
+            `${TEACHER_SERVICE}/api/teachers/${encodeURIComponent(email)}/last-signin`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ when: new Date().toISOString() }),
+            }
+        );
+    } catch (e) {
+        console.warn("last-signin update failed:", e?.message || e);
+    }
+}
+
 /**
- * Password login (unchanged, but now calls teacher verify for bcrypt)
+ * Password login (bcrypt verify via teacher-service)
  */
 router.post("/login", async (req, res) => {
     const { email, password } = req.body || {};
@@ -30,7 +46,6 @@ router.post("/login", async (req, res) => {
     }
 
     try {
-        // ask teacher-service to verify bcrypt
         const resp = await fetch(`${TEACHER_SERVICE}/api/teachers/verify`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -44,14 +59,16 @@ router.post("/login", async (req, res) => {
         }
         const t = data.teacher || {};
         if (t.blocked) {
-            return res
-                .status(403)
-                .json({
-                    success: false,
-                    message:
-                        "Votre compte est bloqué. Veuillez contacter l’administrateur.",
-                });
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Votre compte est bloqué. Veuillez contacter l’administrateur.",
+            });
         }
+
+        // NEW: record last sign-in
+        await recordLastSignin(email);
+
         return res.json({
             success: true,
             role: "teacher",
@@ -66,8 +83,8 @@ router.post("/login", async (req, res) => {
 });
 
 /**
- * Google login (NEW)
- * Body: { credential } where credential is the Google ID token from GIS
+ * Google login via Google Identity token (only used if you POST a credential here).
+ * With NextAuth you usually don't call this route, but we keep it working.
  */
 router.post("/login/google", async (req, res) => {
     try {
@@ -78,7 +95,6 @@ router.post("/login/google", async (req, res) => {
                 .json({ success: false, message: "Missing Google credential" });
         }
 
-        // verify token
         const ticket = await googleClient.verifyIdToken({
             idToken: credential,
             audience: GOOGLE_CLIENT_ID,
@@ -92,7 +108,6 @@ router.post("/login/google", async (req, res) => {
                 .json({ success: false, message: "Invalid Google token" });
         }
 
-        // only allow teachers in our DB
         const tResp = await fetch(
             `${TEACHER_SERVICE}/api/teachers/${encodeURIComponent(email)}`
         );
@@ -104,7 +119,6 @@ router.post("/login/google", async (req, res) => {
                     "Ce compte Google n’est pas autorisé (email non trouvé dans la liste des enseignants).",
             });
         }
-
         if (!tResp.ok) {
             return res
                 .status(500)
@@ -119,6 +133,9 @@ router.post("/login/google", async (req, res) => {
                     "Votre compte est bloqué. Veuillez contacter l’administrateur.",
             });
         }
+
+        // NEW: record last sign-in
+        await recordLastSignin(email);
 
         return res.json({
             success: true,
